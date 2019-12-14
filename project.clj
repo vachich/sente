@@ -13,6 +13,7 @@
   :dependencies
   [[org.clojure/clojure      "1.9.0"]
    [org.clojure/core.async   "0.5.527"]
+   [org.java-websocket/Java-WebSocket "1.4.0"]
    [com.taoensso/encore      "2.117.0"]
    [org.clojure/tools.reader "1.3.2"]
    [com.taoensso/timbre      "4.10.0"]]

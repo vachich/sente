@@ -82,25 +82,32 @@
 
   #?(:clj
      (:require
-      [clojure.string :as str]
-      [clojure.core.async :as async :refer (<! <!! >! >!! put! chan go go-loop)]
-      [taoensso.encore :as enc :refer (swap-in! reset-in! swapped have have! have?)]
-      [taoensso.timbre :as timbre :refer (tracef debugf infof warnf errorf)]
-      [taoensso.sente.interfaces :as interfaces]))
+       [clojure.string :as str]
+       [clojure.core.async :as async :refer (<! <!! >! >!! put! chan go go-loop)]
+       [taoensso.encore :as enc :refer (swap-in! reset-in! swapped have have! have?)]
+       [taoensso.timbre :as timbre :refer (tracef debugf infof warnf errorf)]
+       [taoensso.sente.interfaces :as interfaces])
+     (:import [org.java_websocket.client WebSocketClient]))
 
   #?(:cljs
      (:require
-      [clojure.string :as str]
-      [cljs.core.async :as async :refer (<! >! put! chan)]
-      [taoensso.encore :as enc :refer (format swap-in! reset-in! swapped)
-       :refer-macros (have have! have?)]
-      [taoensso.timbre :as timbre :refer-macros (tracef debugf infof warnf errorf)]
-      [taoensso.sente.interfaces :as interfaces]))
+       [clojure.string :as str]
+       [cljs.core.async :as async :refer (<! >! put! chan)]
+       [taoensso.encore :as enc :refer (format swap-in! reset-in! swapped)
+        :refer-macros (have have! have?)]
+       [taoensso.timbre :as timbre :refer-macros (tracef debugf infof warnf errorf)]
+       [taoensso.sente.interfaces :as interfaces]))
 
   #?(:cljs
      (:require-macros
-      [cljs.core.async.macros :as asyncm :refer (go go-loop)]
-      [taoensso.sente :as sente-macros :refer (elide-require)])))
+       [cljs.core.async.macros :as asyncm :refer (go go-loop)]
+       [taoensso.sente :as sente-macros :refer (elide-require)]))
+  (:import (org.java_websocket.client WebSocketClient)
+           (org.java_websocket.handshake ServerHandshake)
+           (org.java_websocket.drafts Draft)
+           (com.sun.jndi.toolkit.url Uri)
+           (java.net URI)
+           (com.google.common.collect ImmutableMap)))
 
 (if (vector? taoensso.encore/encore-version)
   (enc/assert-min-encore-version [2 105 0])
@@ -820,12 +827,12 @@
 ;;;; Client API
 
 #?(:cljs (def ajax-lite "Alias of `taoensso.encore/ajax-lite`" enc/ajax-lite))
-#?(:cljs
-   (defprotocol IChSocket
-     (-chsk-connect!    [chsk])
-     (-chsk-disconnect! [chsk reason])
-     (-chsk-reconnect!  [chsk])
-     (-chsk-send!       [chsk ev opts])))
+
+ (defprotocol IChSocket
+   (-chsk-connect!    [chsk])
+   (-chsk-disconnect! [chsk reason])
+   (-chsk-reconnect!  [chsk])
+   (-chsk-send!       [chsk ev opts]))
 
 #?(:cljs
    (do
@@ -835,136 +842,126 @@
        [chsk] (-chsk-reconnect! chsk))
      (def chsk-destroy! "Deprecated" chsk-disconnect!)))
 
-#?(:cljs
-   (defn chsk-send!
-     "Sends `[ev-id ev-?data :as event]`, returns true on apparent success."
-     ([chsk ev] (chsk-send! chsk ev {}))
-     ([chsk ev ?timeout-ms ?cb] (chsk-send! chsk ev {:timeout-ms ?timeout-ms
-                                                     :cb         ?cb}))
-     ([chsk ev opts]
-      (tracef "Chsk send: (%s) %s" (assoc opts :cb (boolean (:cb opts))) ev)
-      (-chsk-send! chsk ev opts))))
+(defn chsk-send!
+ "Sends `[ev-id ev-?data :as event]`, returns true on apparent success."
+ ([chsk ev] (chsk-send! chsk ev {}))
+ ([chsk ev ?timeout-ms ?cb] (chsk-send! chsk ev {:timeout-ms ?timeout-ms
+                                                 :cb         ?cb}))
+ ([chsk ev opts]
+  (tracef "Chsk send: (%s) %s" (assoc opts :cb (boolean (:cb opts))) ev)
+  (-chsk-send! chsk ev opts)))
 
-#?(:cljs
-   (defn- chsk-send->closed! [?cb-fn]
-     (warnf "Chsk send against closed chsk.")
-     (when ?cb-fn (?cb-fn :chsk/closed))
-     false))
+(defn- chsk-send->closed! [?cb-fn]
+ (warnf "Chsk send against closed chsk.")
+ (when ?cb-fn (?cb-fn :chsk/closed))
+ false)
 
-#?(:cljs
-   (defn- assert-send-args [x ?timeout-ms ?cb]
-     (assert-event x)
-     (assert (or (and (nil? ?timeout-ms) (nil? ?cb))
-                 (and (enc/nat-int? ?timeout-ms)))
-             (str "cb requires a timeout; timeout-ms should be a +ive integer: " ?timeout-ms))
-     (assert (or (nil? ?cb) (ifn? ?cb) (enc/chan? ?cb))
-             (str "cb should be nil, an ifn, or a channel: " (type ?cb)))))
+(defn- assert-send-args [x ?timeout-ms ?cb]
+ (assert-event x)
+ (assert (or (and (nil? ?timeout-ms) (nil? ?cb))
+             (and (enc/nat-int? ?timeout-ms)))
+         (str "cb requires a timeout; timeout-ms should be a +ive integer: " ?timeout-ms))
+ (assert (or (nil? ?cb) (ifn? ?cb) (enc/chan? ?cb))
+         (str "cb should be nil, an ifn, or a channel: " (type ?cb))))
 
-#?(:cljs
-   (defn- pull-unused-cb-fn! [cbs-waiting_ ?cb-uuid]
-     (when-let [cb-uuid ?cb-uuid]
-       (swap-in! cbs-waiting_ [cb-uuid]
-                 (fn [?f] (swapped :swap/dissoc ?f))))))
+(defn- pull-unused-cb-fn! [cbs-waiting_ ?cb-uuid]
+ (when-let [cb-uuid ?cb-uuid]
+   (swap-in! cbs-waiting_ [cb-uuid]
+             (fn [?f] (swapped :swap/dissoc ?f)))))
 
-#?(:cljs
-   (defn- swap-chsk-state!
-     "Atomically swaps the value of chk's :state_ atom."
-     [chsk f]
-     (let [[old-state new-state]
-           (swap-in! (:state_ chsk)
-             (fn [old-state]
-               (let [new-state (f old-state)
-                     new-state
-                     (if (:first-open? old-state)
-                       (assoc new-state :first-open? false)
-                       new-state)
+(defn- swap-chsk-state!
+ "Atomically swaps the value of chk's :state_ atom."
+ [chsk f]
+ (let [[old-state new-state]
+       (swap-in! (:state_ chsk)
+         (fn [old-state]
+           (let [new-state (f old-state)
+                 new-state
+                 (if (:first-open? old-state)
+                   (assoc new-state :first-open? false)
+                   new-state)
 
-                     new-state
-                     (if (:open? new-state)
-                       (dissoc new-state :udt-next-reconnect)
-                       new-state)]
+                 new-state
+                 (if (:open? new-state)
+                   (dissoc new-state :udt-next-reconnect)
+                   new-state)]
 
-                 (swapped new-state [old-state new-state]))))]
+             (swapped new-state [old-state new-state]))))]
 
-       (when (not= old-state new-state)
-         (let [output [old-state new-state]]
-           ;; (debugf "Chsk state change: %s" output)
-           (put! (get-in chsk [:chs :state]) [:chsk/state output])
-           output)))))
+   (when (not= old-state new-state)
+     (let [output [old-state new-state]]
+       ;; (debugf "Chsk state change: %s" output)
+       (put! (get-in chsk [:chs :state]) [:chsk/state output])
+       output))))
 
-#?(:cljs
-   (defn- chsk-state->closed [state reason]
-     (have? map? state)
-     (have? [:el #{:requested-disconnect
-                   :requested-reconnect
-                   :downgrading-ws-to-ajax
-                   :unexpected}] reason)
-     (if (or (:open? state) (not= reason :unexpected))
-       (-> state
-           (dissoc :udt-next-reconnect)
-           (assoc
-             :open? false
-             :last-close {:udt (enc/now-udt) :reason reason}))
-       state)))
+ (defn- chsk-state->closed [state reason]
+   (have? map? state)
+   (have? [:el #{:requested-disconnect
+                 :requested-reconnect
+                 :downgrading-ws-to-ajax
+                 :unexpected}] reason)
+   (if (or (:open? state) (not= reason :unexpected))
+     (-> state
+         (dissoc :udt-next-reconnect)
+         (assoc
+           :open? false
+           :last-close {:udt (enc/now-udt) :reason reason}))
+     state))
 
-#?(:cljs
-   (defn- cb-chan-as-fn
-     "Experimental, undocumented. Allows a core.async channel to be provided
-     instead of a cb-fn. The channel will receive values of form
-     [<event-id>.cb <reply>]."
-     [?cb ev]
-     (if (or (nil? ?cb) (ifn? ?cb))
-       ?cb
-       (do
-         (have? enc/chan? ?cb)
-         (assert-event ev)
-         (let [[ev-id _] ev
-               cb-ch ?cb]
-           (fn [reply]
-             (put! cb-ch
-               [(keyword (str (enc/as-qname ev-id) ".cb"))
-                reply])))))))
+(defn- cb-chan-as-fn
+ "Experimental, undocumented. Allows a core.async channel to be provided
+ instead of a cb-fn. The channel will receive values of form
+ [<event-id>.cb <reply>]."
+ [?cb ev]
+ (if (or (nil? ?cb) (ifn? ?cb))
+   ?cb
+   (do
+     (have? enc/chan? ?cb)
+     (assert-event ev)
+     (let [[ev-id _] ev
+           cb-ch ?cb]
+       (fn [reply]
+         (put! cb-ch
+           [(keyword (str (enc/as-qname ev-id) ".cb"))
+            reply]))))))
 
-#?(:cljs
-   (defn- receive-buffered-evs! [chs clj]
-     (tracef "receive-buffered-evs!: %s" clj)
-     (let [buffered-evs (have vector? clj)]
-       (doseq [ev buffered-evs]
-         (assert-event ev)
-         ;; Should never receive :chsk/* events from server here:
-         (let [[id] ev] (assert (not= (namespace id) "chsk")))
-         (put! (:<server chs) ev)))))
+(defn- receive-buffered-evs! [chs clj]
+ (tracef "receive-buffered-evs!: %s" clj)
+ (let [buffered-evs (have vector? clj)]
+   (doseq [ev buffered-evs]
+     (assert-event ev)
+     ;; Should never receive :chsk/* events from server here:
+     (let [[id] ev] (assert (not= (namespace id) "chsk")))
+     (put! (:<server chs) ev))))
 
-#?(:cljs
-   (defn- handshake? [x]
-     (and (vector? x) ; Nb support arb input (e.g. cb replies)
-          (let [[x1] x] (= x1 :chsk/handshake)))))
+(defn- handshake? [x]
+ (and (vector? x) ; Nb support arb input (e.g. cb replies)
+      (let [[x1] x] (= x1 :chsk/handshake))))
 
-#?(:cljs
-   (defn- receive-handshake! [chsk-type chsk clj]
-     (have? [:el #{:ws :ajax}] chsk-type)
-     (have? handshake? clj)
-     (tracef "receive-handshake! (%s): %s" chsk-type clj)
-     (let [[_ [?uid _ ?handshake-data]] clj
-           {:keys [chs ever-opened?_]} chsk
-           first-handshake? (compare-and-set! ever-opened?_ false true)
-           new-state
-           {:type           chsk-type ; :auto -> e/o #{:ws :ajax}, etc.
-            :open?          true
-            :ever-opened?   true
-            :uid            ?uid
-            :handshake-data ?handshake-data
-            :first-open?    first-handshake?}
+(defn- receive-handshake! [chsk-type chsk clj]
+ (have? [:el #{:ws :ajax}] chsk-type)
+ (have? handshake? clj)
+ (tracef "receive-handshake! (%s): %s" chsk-type clj)
+ (let [[_ [?uid _ ?handshake-data]] clj
+       {:keys [chs ever-opened?_]} chsk
+       first-handshake? (compare-and-set! ever-opened?_ false true)
+       new-state
+       {:type           chsk-type ; :auto -> e/o #{:ws :ajax}, etc.
+        :open?          true
+        :ever-opened?   true
+        :uid            ?uid
+        :handshake-data ?handshake-data
+        :first-open?    first-handshake?}
 
-           handshake-ev
-           [:chsk/handshake
-            [?uid nil ?handshake-data first-handshake?]]]
+       handshake-ev
+       [:chsk/handshake
+        [?uid nil ?handshake-data first-handshake?]]]
 
-       (assert-event handshake-ev)
-       (swap-chsk-state! chsk #(merge % new-state))
-       (put! (:internal chs) handshake-ev)
+   (assert-event handshake-ev)
+   (swap-chsk-state! chsk #(merge % new-state))
+   (put! (:internal chs) handshake-ev)
 
-       :handled)))
+   :handled))
 
 #?(:clj
    (defmacro ^:private elide-require
@@ -994,204 +991,263 @@
                ;; (errorf e "Unable to load npm websocket lib")
                nil)))))))
 
+#?(:clj
+   (defn create-java-client-websocket! [onerror-fn onmessage-fn onclose-fn uri-str]
+     (let [uri (URI. uri-str)
+           headers
+           (ImmutableMap/of
+             "Origin" "http://localhost:3200"
+             "Referer" "http://localhost:3200"
+             "Sec-WebSocket-Extensions" "permessage-deflate; client_max_window_bits"
+             )
+       ws-client (proxy [WebSocketClient] [uri headers]
+         (onOpen [^ServerHandshake handshakedata]
+           (println "ws onOpen " handshakedata)
+           nil)
+         (onError [ex]
+           (println "ws onError" ex)
+           (onerror-fn ex))
+         (onMessage [^String message]
+           (println "ws onMessage" message)
+           (onmessage-fn message))
+         (onClose [code reason remote]
+           (println "ws onClose" "code" code "reason" reason "remote" remote)
+           (onclose-fn code reason remote))
+         )]
+       ; js client attempts to connect right away at construction time, java one wouldn't
+       ; necessarily need to do that but connect here to mimic the behavior
+       (.connect ws-client)
+       ws-client)))
+
 #?(:cljs
-   (defrecord ChWebSocket
-     ;; WebSocket-only IChSocket implementation
-     ;; Handles (re)connections, cbs, etc.
+(defn create-js-client-websocket! [onerror-fn onmessage-fn onclose-fn uri-str]
+  (let [?socket (WebSocket. uri-str)]
+   (doto ?socket
+     (aset "onerror" onerror-fn)
+     (aset "onmessage"                ; Nb receives both push & cb evs!
+       onmessage-fn)
 
-     [client-id chs params packer url ws-kalive-ms
-      state_ ; {:type _ :open? _ :uid _ :csrf-token _ ...}
-      instance-handle_ retry-count_ ever-opened?_
-      backoff-ms-fn ; (fn [nattempt]) -> msecs
-      cbs-waiting_ ; {<cb-uuid> <fn> ...}
-      socket_
-      udt-last-comms_]
+     ;; Fires repeatedly (on each connection attempt) while
+     ;; server is down:
+     (aset "onclose" onclose-fn))
+    ?socket)))
 
-     IChSocket
-     (-chsk-disconnect! [chsk reason]
-       (reset! instance-handle_ nil) ; Disable auto retry
-       (swap-chsk-state! chsk #(chsk-state->closed % reason))
-       (when-let [s @socket_] (.close s 1000 "CLOSE_NORMAL")))
+(defn create-websocket! [onerror-fn onmessage-fn onclose-fn uri-str]
+  #?(:clj  (create-java-client-websocket! onerror-fn onmessage-fn onclose-fn uri-str)
+     :cljs (create-js-client-websocket! onerror-fn onmessage-fn onclose-fn uri-str)))
 
-     (-chsk-reconnect! [chsk]
-       (-chsk-disconnect! chsk :requested-reconnect)
-       (-chsk-connect!    chsk))
+ (defrecord ChWebSocket
+   ;; WebSocket-only IChSocket implementation
+   ;; Handles (re)connections, cbs, etc.
 
-     (-chsk-send! [chsk ev opts]
-       (let [{?timeout-ms :timeout-ms ?cb :cb :keys [flush?]} opts
-             _ (assert-send-args ev ?timeout-ms ?cb)
-             ?cb-fn (cb-chan-as-fn ?cb ev)]
-         (if-not (:open? @state_) ; Definitely closed
-           (chsk-send->closed! ?cb-fn)
+   [client-id chs params packer url ws-kalive-ms
+    state_ ; {:type _ :open? _ :uid _ :csrf-token _ ...}
+    instance-handle_ retry-count_ ever-opened?_
+    backoff-ms-fn ; (fn [nattempt]) -> msecs
+    cbs-waiting_ ; {<cb-uuid> <fn> ...}
+    socket_
+    udt-last-comms_]
 
-           ;; TODO Buffer before sending (but honor `:flush?`)
-           (let [?cb-uuid (when ?cb-fn (enc/uuid-str 6))
-                 ppstr (pack packer ev ?cb-uuid)]
+   IChSocket
+   (-chsk-disconnect! [chsk reason]
+     (reset! instance-handle_ nil) ; Disable auto retry
+     (swap-chsk-state! chsk #(chsk-state->closed % reason))
+     (when-let [s @socket_] #?(:clj (.closeBlocking ^WebSocketClient s)
+                               :cljs (.close s 1000 "CLOSE_NORMAL"))))
 
-             (when-let [cb-uuid ?cb-uuid]
-               (reset-in! cbs-waiting_ [cb-uuid] (have ?cb-fn))
-               (when-let [timeout-ms ?timeout-ms]
-                 (go
-                   (<! (async/timeout timeout-ms))
-                   (when-let [cb-fn* (pull-unused-cb-fn! cbs-waiting_ ?cb-uuid)]
-                     (cb-fn* :chsk/timeout)))))
+   (-chsk-reconnect! [chsk]
+     (-chsk-disconnect! chsk :requested-reconnect)
+     (-chsk-connect!    chsk))
 
-             (try
-               (.send @socket_ ppstr)
-               (reset! udt-last-comms_ (enc/now-udt))
-               :apparent-success
-               (catch :default e
-                 (errorf e "Chsk send error")
-                 (when-let [cb-uuid ?cb-uuid]
-                   (let [cb-fn* (or (pull-unused-cb-fn! cbs-waiting_ cb-uuid)
-                                    (have ?cb-fn))]
-                     (cb-fn* :chsk/error)))
-                 false))))))
+   (-chsk-send! [chsk ev opts]
+     (let [{?timeout-ms :timeout-ms ?cb :cb :keys [flush?]} opts
+           _ (assert-send-args ev ?timeout-ms ?cb)
+           ?cb-fn (cb-chan-as-fn ?cb ev)]
+       (if-not (:open? @state_) ; Definitely closed
+         (chsk-send->closed! ?cb-fn)
 
-     (-chsk-connect! [chsk]
-       (when-let [WebSocket
-                  (or
-                    (enc/oget goog/global    "WebSocket")
-                    (enc/oget goog/global "MozWebSocket")
-                    (enc/oget @?node-npm-websocket_ "w3cwebsocket"))]
+         ;; TODO Buffer before sending (but honor `:flush?`)
+         (let [?cb-uuid (when ?cb-fn (enc/uuid-str 6))
+               ppstr (pack packer ev ?cb-uuid)]
 
-         (let [instance-handle (reset! instance-handle_ (enc/uuid-str))
-               have-handle? (fn [] (= @instance-handle_ instance-handle))
-               connect-fn
-               (fn connect-fn []
-                 (when (have-handle?)
-                   (let [retry-fn
-                         (fn [] ; Backoff then recur
-                           (when (have-handle?)
-                             (let [retry-count* (swap! retry-count_ inc)
-                                   backoff-ms (backoff-ms-fn retry-count*)
-                                   udt-next-reconnect (+ (enc/now-udt) backoff-ms)]
-                               (warnf "Chsk is closed: will try reconnect attempt (%s) in %s ms"
-                                 retry-count* backoff-ms)
-                               (.setTimeout goog/global connect-fn backoff-ms)
+           (when-let [cb-uuid ?cb-uuid]
+             (reset-in! cbs-waiting_ [cb-uuid] (have ?cb-fn))
+             (when-let [timeout-ms ?timeout-ms]
+               (go
+                 (<! (async/timeout timeout-ms))
+                 (when-let [cb-fn* (pull-unused-cb-fn! cbs-waiting_ ?cb-uuid)]
+                   (cb-fn* :chsk/timeout)))))
+
+           (try
+             (.send ^WebSocketClient @socket_ ^String ppstr)
+             (reset! udt-last-comms_ (enc/now-udt))
+             :apparent-success
+             (catch #?(:clj Throwable :cljs :default) e
+               (errorf e "Chsk send error")
+               (when-let [cb-uuid ?cb-uuid]
+                 (let [cb-fn* (or (pull-unused-cb-fn! cbs-waiting_ cb-uuid)
+                                  (have ?cb-fn))]
+                   (cb-fn* :chsk/error)))
+               false))))))
+
+   (-chsk-connect! [chsk]
+     (when-let [WebSocket
+                #?(:clj WebSocketClient
+                   :cljs
+                   (or
+                     (enc/oget goog/global "WebSocket")
+                     (enc/oget goog/global "MozWebSocket")
+                     (enc/oget @?node-npm-websocket_ "w3cwebsocket")))]
+
+       (let [instance-handle (reset! instance-handle_ (enc/uuid-str))
+             have-handle? (fn [] (= @instance-handle_ instance-handle))
+             connect-fn
+             (fn connect-fn []
+               (when (have-handle?)
+                 (let [retry-fn
+                       (fn [] ; Backoff then recur
+                         (when (have-handle?)
+                           (let [retry-count* (swap! retry-count_ inc)
+                                 backoff-ms (backoff-ms-fn retry-count*)
+                                 udt-next-reconnect (+ (enc/now-udt) backoff-ms)]
+                             (warnf "Chsk is closed: will try reconnect attempt (%s) in %s ms"
+                               retry-count* backoff-ms)
+                             #?(:clj (go
+                                       (<! (async/timeout backoff-ms))
+                                       (connect-fn))
+                                :cljs (.setTimeout goog/global connect-fn backoff-ms))
+                             (swap-chsk-state! chsk
+                               #(assoc % :udt-next-reconnect udt-next-reconnect)))))
+
+                       onerror-fn
+                       (fn [ws-ev]
+                         (let [ex #?(:clj ws-ev
+                                     :cljs (try
+                                             (js->clj ws-ev)
+                                             (catch :default _ ws-ev)))
+                               last-ws-error {:udt (enc/now-udt), :ev ws-ev}]
+                         (errorf ; ^:meta {:raw-console? true}
+                           "WebSocket error: %s"
+                           ex)
+                         (swap-chsk-state! chsk
+                                           #(assoc % :last-ws-error last-ws-error))))
+
+                       onmessage-fn ; Nb receives both push & cb evs!
+                       (fn [ws-ev]
+                         (let [ppstr #?(:clj ws-ev
+                                        :cljs (enc/oget ws-ev "data"))
+                               ;; `clj` may/not satisfy `event?` since
+                               ;; we also receive cb replies here. This
+                               ;; is why we prefix pstrs to indicate
+                               ;; whether they're wrapped or not
+                               [clj ?cb-uuid] (unpack packer ppstr)]
+
+                           (reset! udt-last-comms_ (enc/now-udt))
+
+                           (or
+                             (when (handshake? clj)
+                               (receive-handshake! :ws chsk clj)
+                               (reset! retry-count_ 0)
+                               :handshake)
+
+                             (when (= clj :chsk/ws-ping)
+                               (put! (:<server chs) [:chsk/ws-ping])
+                               :noop)
+
+                             (if-let [cb-uuid ?cb-uuid]
+                               (if-let [cb-fn (pull-unused-cb-fn! cbs-waiting_
+                                                                  cb-uuid)]
+                                 (cb-fn clj)
+                                 (warnf "Cb reply w/o local cb-fn: %s" clj))
+                               (let [buffered-evs clj]
+                                 (receive-buffered-evs! chs buffered-evs))))))
+
+                       ;; Fires repeatedly (on each connection attempt) while
+                       ;; server is down:
+                       onclose-fn
+                       (fn #?(:clj [code reason remote] :cljs [ws-ev])
+                         (let [last-ws-close
+                               #?(:clj
+                                  {:udt    (enc/now-udt)
+                                   :ev     nil ;ws-ev ;does this need to exist?
+                                   ; TODO can we assume client-side close is always clean?
+                                   :clean? (not remote)
+                                   :code   code
+                                   :reason reason}
+
+                                  :cljs
+                                  {:udt    (enc/now-udt)
+                                   :ev     ws-ev
+                                   :clean? (enc/oget ws-ev "wasClean")
+                                   :code   (enc/oget ws-ev "code")
+                                   :reason (enc/oget ws-ev "reason")})]
+
+                           ;; Firefox calls "onclose" while unloading,
+                           ;; Ref. http://goo.gl/G5BYbn:
+                           (if (:clean? last-ws-close)
+                             (do
+                               (debugf "Clean WebSocket close, will not attempt reconnect")
                                (swap-chsk-state! chsk
-                                 #(assoc % :udt-next-reconnect udt-next-reconnect)))))
+                                                 #(assoc % :last-ws-close last-ws-close)))
+                             (do
+                               (swap-chsk-state! chsk
+                                                 #(assoc (chsk-state->closed % :unexpected)
+                                                    :last-ws-close last-ws-close))
+                               (retry-fn)))))
 
-                         ?socket
-                         (try
-                           (WebSocket.
-                             (enc/merge-url-with-query-string url
-                               (merge params ; 1st (don't clobber impl.):
-                                 {:client-id client-id
-                                  :csrf-token (:csrf-token @state_)})))
+                       ?socket
+                       (try
+                         (create-websocket!
+                           onerror-fn onmessage-fn onclose-fn
+                           (enc/merge-url-with-query-string url
+                             (merge params ; 1st (don't clobber impl.):
+                               {:client-id client-id
+                                :csrf-token (:csrf-token @state_)})))
 
-                           (catch :default e
-                             (errorf e "WebSocket error")
-                             nil))]
+                         (catch #?(:clj Throwable :cljs :default) e
+                           (errorf e "WebSocket error")
+                           nil))]
 
-                     (if-not ?socket
-                       (retry-fn) ; Couldn't even get a socket
+                   (if-not ?socket
+                     (retry-fn) ; Couldn't even get a socket
+                     ; TODO is this the right place to clean up the old socket if any exists?
+                     (do
+                       (when @socket_ #?(:clj (.close ^WebSocketClient @socket_) :cljs (.close @socket_)))
+                       (reset! socket_ ?socket))))))]
 
-                       (reset! socket_
-                         (doto ?socket
-                           (aset "onerror"
-                             (fn [ws-ev]
-                               (errorf ; ^:meta {:raw-console? true}
-                                 "WebSocket error: %s"
-                                 (try
-                                   (js->clj ws-ev)
-                                   (catch :default _ ws-ev)))
+         (when-let [ms ws-kalive-ms]
+           (go-loop []
+             (let [udt-t0 @udt-last-comms_]
+               (<! (async/timeout ms))
+               (when (have-handle?)
+                 (let [udt-t1 @udt-last-comms_]
+                   (when (= udt-t0 udt-t1)
+                     ;; Ref. issue #259:
+                     ;; We've seen no send/recv activity on this
+                     ;; conn w/in our kalive window so send a ping
+                     ;; ->server (should auto-close conn if it's
+                     ;; gone dead). The server generally sends pings so
+                     ;; this should be rare. Mostly here to help clients
+                     ;; identify conns that were suddenly dropped.
 
-                               (let [last-ws-error {:udt (enc/now-udt), :ev ws-ev}]
-                                 (swap-chsk-state! chsk
-                                   #(assoc % :last-ws-error last-ws-error)))))
+                     (-chsk-send! chsk [:chsk/ws-ping] {:flush? true})))
+                 (recur)))))
 
-                           (aset "onmessage" ; Nb receives both push & cb evs!
-                             (fn [ws-ev]
-                               (let [ppstr (enc/oget ws-ev "data")
+         (reset! retry-count_ 0)
+         (connect-fn)
+         chsk))))
 
-                                     ;; `clj` may/not satisfy `event?` since
-                                     ;; we also receive cb replies here. This
-                                     ;; is why we prefix pstrs to indicate
-                                     ;; whether they're wrapped or not
-                                     [clj ?cb-uuid] (unpack packer ppstr)]
-
-                                 (reset! udt-last-comms_ (enc/now-udt))
-
-                                 (or
-                                   (when (handshake? clj)
-                                     (receive-handshake! :ws chsk clj)
-                                     (reset! retry-count_ 0)
-                                     :handshake)
-
-                                   (when (= clj :chsk/ws-ping)
-                                     (put! (:<server chs) [:chsk/ws-ping])
-                                     :noop)
-
-                                   (if-let [cb-uuid ?cb-uuid]
-                                     (if-let [cb-fn (pull-unused-cb-fn! cbs-waiting_
-                                                      cb-uuid)]
-                                       (cb-fn clj)
-                                       (warnf "Cb reply w/o local cb-fn: %s" clj))
-                                     (let [buffered-evs clj]
-                                       (receive-buffered-evs! chs buffered-evs)))))))
-
-                           ;; Fires repeatedly (on each connection attempt) while
-                           ;; server is down:
-                           (aset "onclose"
-                             (fn [ws-ev]
-                               (let [clean? (enc/oget ws-ev "wasClean")
-                                     code   (enc/oget ws-ev "code")
-                                     reason (enc/oget ws-ev "reason")
-                                     last-ws-close
-                                     {:udt    (enc/now-udt)
-                                      :ev     ws-ev
-                                      :clean? clean?
-                                      :code   code
-                                      :reason reason}]
-
-                                 ;; Firefox calls "onclose" while unloading,
-                                 ;; Ref. http://goo.gl/G5BYbn:
-                                 (if clean?
-                                   (do
-                                     (debugf "Clean WebSocket close, will not attempt reconnect")
-                                     (swap-chsk-state! chsk
-                                       #(assoc % :last-ws-close last-ws-close)))
-                                   (do
-                                     (swap-chsk-state! chsk
-                                       #(assoc (chsk-state->closed % :unexpected)
-                                          :last-ws-close last-ws-close))
-                                     (retry-fn))))))))))))]
-
-           (when-let [ms ws-kalive-ms]
-             (go-loop []
-               (let [udt-t0 @udt-last-comms_]
-                 (<! (async/timeout ms))
-                 (when (have-handle?)
-                   (let [udt-t1 @udt-last-comms_]
-                     (when (= udt-t0 udt-t1)
-                       ;; Ref. issue #259:
-                       ;; We've seen no send/recv activity on this
-                       ;; conn w/in our kalive window so send a ping
-                       ;; ->server (should auto-close conn if it's
-                       ;; gone dead). The server generally sends pings so
-                       ;; this should be rare. Mostly here to help clients
-                       ;; identify conns that were suddenly dropped.
-
-                       (-chsk-send! chsk [:chsk/ws-ping] {:flush? true})))
-                   (recur)))))
-
-           (reset! retry-count_ 0)
-           (connect-fn)
-           chsk)))))
-
-#?(:cljs
-   (defn- new-ChWebSocket [opts csrf-token]
-     (map->ChWebSocket
-       (merge
-         {:state_ (atom {:type :ws :open? false :ever-opened? false :csrf-token csrf-token})
-          :instance-handle_ (atom nil)
-          :retry-count_     (atom 0)
-          :ever-opened?_    (atom false)
-          :cbs-waiting_     (atom {})
-          :socket_          (atom nil)
-          :udt-last-comms_  (atom nil)}
-         opts))))
+(defn- new-ChWebSocket [opts csrf-token]
+ (map->ChWebSocket
+   (merge
+     {:state_ (atom {:type :ws :open? false :ever-opened? false :csrf-token csrf-token})
+      :instance-handle_ (atom nil)
+      :retry-count_     (atom 0)
+      :ever-opened?_    (atom false)
+      :cbs-waiting_     (atom {})
+      :socket_          (atom nil)
+      :udt-last-comms_  (atom nil)}
+     opts)))
 
 (def ^:private default-client-side-ajax-timeout-ms
   "We must set *some* client-side timeout otherwise an unpredictable (and
@@ -1438,150 +1494,159 @@
           :impl_  (atom nil)}
          opts))))
 
-#?(:cljs
-   (defn- get-chsk-url [protocol host path type]
-     (let [protocol (case protocol :http "http:" :https "https:" protocol)
-           protocol (have [:el #{"http:" "https:"}] protocol)
-           protocol (case type
-                      :ajax     protocol
-                      :ws (case protocol "https:" "wss:" "http:" "ws:"))]
-       (str protocol "//" (enc/path host path)))))
+(defn- get-chsk-url [protocol host path type]
+ (let [protocol (case protocol :http "http:" :https "https:" protocol)
+       protocol (have [:el #{"http:" "https:"}] protocol)
+       protocol (case type
+                  :ajax     protocol
+                  :ws (case protocol "https:" "wss:" "http:" "ws:"))]
+   (str protocol "//" (enc/path host path))))
 
-#?(:cljs
-   (defn make-channel-socket-client!
-     "Returns nil on failure, or a map with keys:
-       :ch-recv ; core.async channel to receive `event-msg`s (internal or from
-                ; clients). May `put!` (inject) arbitrary `event`s to this channel.
-       :send-fn ; (fn [event & [?timeout-ms ?cb-fn]]) for client>server send.
-       :state   ; Watchable, read-only (atom {:type _ :open? _ :uid _ :csrf-token _}).
-       :chsk    ; IChSocket implementer. You can usu. ignore this.
+ (defn make-channel-socket-client!
+   "Returns nil on failure, or a map with keys:
+     :ch-recv ; core.async channel to receive `event-msg`s (internal or from
+              ; clients). May `put!` (inject) arbitrary `event`s to this channel.
+     :send-fn ; (fn [event & [?timeout-ms ?cb-fn]]) for client>server send.
+     :state   ; Watchable, read-only (atom {:type _ :open? _ :uid _ :csrf-token _}).
+     :chsk    ; IChSocket implementer. You can usu. ignore this.
 
-     Common options:
-       :type           ; e/o #{:auto :ws :ajax}. You'll usually want the default (:auto).
-       :protocol       ; Server protocol, e/o #{:http :https}.
-       :host           ; Server host (defaults to current page's host).
-       :port           ; Server port (defaults to current page's port).
-       :params         ; Map of any params to incl. in chsk Ring requests (handy
-                       ; for application-level auth, etc.).
-       :packer         ; :edn (default), or an IPacker implementation.
-       :ajax-opts      ; Base opts map provided to `taoensso.encore/ajax-lite`.
-       :wrap-recv-evs? ; Should events from server be wrapped in [:chsk/recv _]?
-       :ws-kalive-ms   ; Ping to keep a WebSocket conn alive if no activity
-                       ; w/in given msecs. Should be different to server's :ws-kalive-ms."
+   Common options:
+     :type           ; e/o #{:auto :ws :ajax}. You'll usually want the default (:auto).
+     :protocol       ; Server protocol, e/o #{:http :https}.
+     :host           ; Server host (defaults to current page's host).
+     :port           ; Server port (defaults to current page's port).
+     :params         ; Map of any params to incl. in chsk Ring requests (handy
+                     ; for application-level auth, etc.).
+     :packer         ; :edn (default), or an IPacker implementation.
+     :ajax-opts      ; Base opts map provided to `taoensso.encore/ajax-lite`.
+     :wrap-recv-evs? ; Should events from server be wrapped in [:chsk/recv _]?
+     :ws-kalive-ms   ; Ping to keep a WebSocket conn alive if no activity
+                     ; w/in given msecs. Should be different to server's :ws-kalive-ms."
 
-     [path ?csrf-token &
-      [{:keys [type protocol host port params recv-buf-or-n packer ws-kalive-ms
-               client-id ajax-opts wrap-recv-evs? backoff-ms-fn]
-        :as   opts
-        :or   {type           :auto
-               recv-buf-or-n  (async/sliding-buffer 2048) ; Mostly for buffered-evs
-               packer         :edn
-               client-id      (or (:client-uuid opts) ; Backwards compatibility
-                                  (enc/uuid-str))
-               wrap-recv-evs? true
-               backoff-ms-fn  enc/exp-backoff
-               ws-kalive-ms   (enc/ms :secs 20)}}
+   [path ?csrf-token &
+    [{:keys [type protocol host port params recv-buf-or-n packer ws-kalive-ms
+             client-id ajax-opts wrap-recv-evs? backoff-ms-fn]
+      :as   opts
+      :or   {type           :auto
+             recv-buf-or-n  (async/sliding-buffer 2048) ; Mostly for buffered-evs
+             packer         :edn
+             client-id      (or (:client-uuid opts) ; Backwards compatibility
+                                (enc/uuid-str))
+             wrap-recv-evs? true
+             backoff-ms-fn  enc/exp-backoff
+             ws-kalive-ms   (enc/ms :secs 20)}}
 
-       _deprecated-more-opts]]
+     _deprecated-more-opts]]
 
-     (have? [:in #{:ajax :ws :auto}] type)
-     (have? enc/nblank-str? client-id)
+   (have? [:in #{:ajax :ws :auto}] type)
+   (have? enc/nblank-str? client-id)
 
-     (when (not (nil? _deprecated-more-opts)) (warnf "`make-channel-socket-client!` fn signature CHANGED with Sente v0.10.0."))
-     (when (contains? opts :lp-timeout) (warnf ":lp-timeout opt has CHANGED; please use :lp-timout-ms."))
+   (when (not (nil? _deprecated-more-opts)) (warnf "`make-channel-socket-client!` fn signature CHANGED with Sente v0.10.0."))
+   (when (contains? opts :lp-timeout) (warnf ":lp-timeout opt has CHANGED; please use :lp-timout-ms."))
 
-     (when (or (not (string? ?csrf-token)) (str/blank? ?csrf-token))
-       (warnf "WARNING: no CSRF token provided. Connections will FAIL if server-side CSRF check is enabled (as it is by default)."))
+   (when (or (not (string? ?csrf-token)) (str/blank? ?csrf-token))
+     (warnf "WARNING: no CSRF token provided. Connections will FAIL if server-side CSRF check is enabled (as it is by default)."))
 
-     (let [packer (coerce-packer packer)
+   (let [packer (coerce-packer packer)
 
-           [ws-url ajax-url]
-           (let [;; Not available with React Native, etc.:
-                 win-loc  (enc/get-win-loc)
-                 path     (or path (:pathname win-loc))]
+         [ws-url ajax-url]
+         (let [;; Not available with React Native, etc.:
+               ; must always provide path for java client
+               win-loc  #?(:clj nil :cljs (enc/get-win-loc))
+               path     (or path (:pathname win-loc))]
 
-             (if-let [f (:chsk-url-fn opts)] ; Deprecated
-               [(f path win-loc :ws)
-                (f path win-loc :ajax)]
+           (if-let [f (:chsk-url-fn opts)] ; Deprecated
+             [(f path win-loc :ws)
+              (f path win-loc :ajax)]
 
-               (let [protocol (or protocol (:protocol win-loc) :http)
-                     host     (if port
-                                (str (:hostname win-loc) ":" port)
-                                (do  (:host     win-loc)))]
-                 [(get-chsk-url protocol host path :ws)
-                  (get-chsk-url protocol host path :ajax)])))
+             (let [protocol (or protocol (:protocol win-loc) :http)
+                   host
+                   (if host
+                     (if port (str host ":" port) host)
+                     (if port
+                       (str (:hostname win-loc) ":" port)
+                       (do (:host win-loc))))]
 
-           private-chs
-           {:internal (chan (async/sliding-buffer 128))
-            :state    (chan (async/sliding-buffer 10))
-            :<server
-            (let [;; Nb must be >= max expected buffered-evs size:
-                  buf (async/sliding-buffer 512)]
-              (if wrap-recv-evs?
-                (chan buf (map (fn [ev] [:chsk/recv ev])))
-                (chan buf)))}
+                   ;host     (if port
+                   ;           (str (:hostname win-loc) ":" port)
+                   ;           (do  (:host     win-loc)))]
+               [(get-chsk-url protocol host path :ws)
+                (get-chsk-url protocol host path :ajax)])))
 
-           common-chsk-opts
-           {:client-id    client-id
-            :chs          private-chs
-            :params       params
-            :packer       packer
-            :ws-kalive-ms ws-kalive-ms}
+         private-chs
+         {:internal (chan (async/sliding-buffer 128))
+          :state    (chan (async/sliding-buffer 10))
+          :<server
+          (let [;; Nb must be >= max expected buffered-evs size:
+                buf (async/sliding-buffer 512)]
+            (if wrap-recv-evs?
+              (chan buf (map (fn [ev] [:chsk/recv ev])))
+              (chan buf)))}
 
-           ws-chsk-opts
-           (merge common-chsk-opts
-             {:url           ws-url
-              :backoff-ms-fn backoff-ms-fn})
+         common-chsk-opts
+         {:client-id    client-id
+          :chs          private-chs
+          :params       params
+          :packer       packer
+          :ws-kalive-ms ws-kalive-ms}
 
-           ajax-chsk-opts
-           (merge common-chsk-opts
-             {:url           ajax-url
-              :ajax-opts     ajax-opts
-              :backoff-ms-fn backoff-ms-fn})
+         ws-chsk-opts
+         (merge common-chsk-opts
+           {:url           ws-url
+            :backoff-ms-fn backoff-ms-fn})
 
-           auto-chsk-opts
-           {:ws-chsk-opts   ws-chsk-opts
-            :ajax-chsk-opts ajax-chsk-opts}
+         ajax-chsk-opts
+         (merge common-chsk-opts
+           {:url           ajax-url
+            :ajax-opts     ajax-opts
+            :backoff-ms-fn backoff-ms-fn})
 
-           ?chsk
-           (-chsk-connect!
-             (case type
-               :ws   (new-ChWebSocket    ws-chsk-opts ?csrf-token)
-               :ajax (new-ChAjaxSocket ajax-chsk-opts ?csrf-token)
-               :auto (new-ChAutoSocket auto-chsk-opts ?csrf-token)))]
+         auto-chsk-opts
+         {:ws-chsk-opts   ws-chsk-opts
+          :ajax-chsk-opts ajax-chsk-opts}
 
-       (if-let [chsk ?chsk]
-         (let [chsk-state_ (:state_ chsk)
-               internal-ch (:internal private-chs)
-               send-fn (partial chsk-send! chsk)
-               ev-ch
-               (async/merge
-                 [(:internal private-chs)
-                  (:state    private-chs)
-                  (:<server  private-chs)]
-                 recv-buf-or-n)
+         ?chsk
+         (-chsk-connect!
+           (case type
+             :ws   (new-ChWebSocket    ws-chsk-opts ?csrf-token)
+             :ajax #?(:clj (throw (UnsupportedOperationException. "Only pure websocket are supported for clj"))
+                      :cljs (new-ChAjaxSocket ajax-chsk-opts ?csrf-token))
+             ; TODO only allow WebSocket for java clients. Should we instead throw an error here?
+             :auto #?(:clj (new-ChWebSocket    ws-chsk-opts ?csrf-token)
+                      :cljs (new-ChAutoSocket auto-chsk-opts ?csrf-token))))]
 
-               ev-msg-ch
-               (async/chan 1
-                 (map
-                   (fn [ev]
-                     (let [[ev-id ev-?data :as ev] (as-event ev)]
-                       {;; Allow client to inject into router for handler:
-                        :ch-recv internal-ch
-                        :send-fn send-fn
-                        :state   chsk-state_
-                        :event   ev
-                        :id      ev-id
-                        :?data   ev-?data}))))]
+     (if-let [chsk ?chsk]
+       (let [chsk-state_ (:state_ chsk)
+             internal-ch (:internal private-chs)
+             send-fn (partial chsk-send! chsk)
+             ev-ch
+             (async/merge
+               [(:internal private-chs)
+                (:state    private-chs)
+                (:<server  private-chs)]
+               recv-buf-or-n)
 
-           (async/pipe ev-ch ev-msg-ch)
+             ev-msg-ch
+             (async/chan 1
+               (map
+                 (fn [ev]
+                   (let [[ev-id ev-?data :as ev] (as-event ev)]
+                     {;; Allow client to inject into router for handler:
+                      :ch-recv internal-ch
+                      :send-fn send-fn
+                      :state   chsk-state_
+                      :event   ev
+                      :id      ev-id
+                      :?data   ev-?data}))))]
 
-           {:chsk    chsk
-            :ch-recv ev-msg-ch
-            :send-fn send-fn
-            :state   (:state_ chsk)})
+         (async/pipe ev-ch ev-msg-ch)
 
-         (warnf "Failed to create channel socket")))))
+         {:chsk    chsk
+          :ch-recv ev-msg-ch
+          :send-fn send-fn
+          :state   (:state_ chsk)})
+
+       (warnf "Failed to create channel socket"))))
 
 ;;;; Event-msg routers (handler loops)
 
