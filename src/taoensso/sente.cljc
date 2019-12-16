@@ -87,7 +87,13 @@
        [taoensso.encore :as enc :refer (swap-in! reset-in! swapped have have! have?)]
        [taoensso.timbre :as timbre :refer (tracef debugf infof warnf errorf)]
        [taoensso.sente.interfaces :as interfaces])
-     (:import [org.java_websocket.client WebSocketClient]))
+  (:import (org.java_websocket.client WebSocketClient)
+           (org.java_websocket.handshake ServerHandshake)
+           (org.java_websocket.drafts Draft)
+           (com.sun.jndi.toolkit.url Uri)
+           (java.net URI)
+           (com.google.common.collect ImmutableMap)
+           (org.java_websocket.framing CloseFrame)))
 
   #?(:cljs
      (:require
@@ -101,14 +107,7 @@
   #?(:cljs
      (:require-macros
        [cljs.core.async.macros :as asyncm :refer (go go-loop)]
-       [taoensso.sente :as sente-macros :refer (elide-require)]))
-  (:import (org.java_websocket.client WebSocketClient)
-           (org.java_websocket.handshake ServerHandshake)
-           (org.java_websocket.drafts Draft)
-           (com.sun.jndi.toolkit.url Uri)
-           (java.net URI)
-           (com.google.common.collect ImmutableMap)
-           (org.java_websocket.framing CloseFrame)))
+       [taoensso.sente :as sente-macros :refer (elide-require)])))
 
 (if (vector? taoensso.encore/encore-version)
   (enc/assert-min-encore-version [2 105 0])
