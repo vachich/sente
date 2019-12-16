@@ -80,20 +80,20 @@
 
   {:author "Peter Taoussanis (@ptaoussanis)"}
 
-  #?(:clj
+  #?@(:clj [
      (:require
        [clojure.string :as str]
        [clojure.core.async :as async :refer (<! <!! >! >!! put! chan go go-loop)]
        [taoensso.encore :as enc :refer (swap-in! reset-in! swapped have have! have?)]
        [taoensso.timbre :as timbre :refer (tracef debugf infof warnf errorf)]
        [taoensso.sente.interfaces :as interfaces])
-  (:import (org.java_websocket.client WebSocketClient)
-           (org.java_websocket.handshake ServerHandshake)
-           (org.java_websocket.drafts Draft)
-           (com.sun.jndi.toolkit.url Uri)
-           (java.net URI)
-           (com.google.common.collect ImmutableMap)
-           (org.java_websocket.framing CloseFrame)))
+    (:import (org.java_websocket.client WebSocketClient)
+             (org.java_websocket.handshake ServerHandshake)
+             (org.java_websocket.drafts Draft)
+             (com.sun.jndi.toolkit.url Uri)
+             (java.net URI)
+             (com.google.common.collect ImmutableMap)
+             (org.java_websocket.framing CloseFrame)) ])
 
   #?(:cljs
      (:require
