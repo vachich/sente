@@ -107,7 +107,8 @@
            (org.java_websocket.drafts Draft)
            (com.sun.jndi.toolkit.url Uri)
            (java.net URI)
-           (com.google.common.collect ImmutableMap)))
+           (com.google.common.collect ImmutableMap)
+           (org.java_websocket.framing CloseFrame)))
 
 (if (vector? taoensso.encore/encore-version)
   (enc/assert-min-encore-version [2 105 0])
@@ -1085,6 +1086,14 @@
              :apparent-success
              (catch #?(:clj Throwable :cljs :default) e
                (errorf e "Chsk send error")
+               ; java WebSocketClient does not auto-close in case of send error
+               ; however, if we only .close here, sente won't attempt to re-connect because
+               ; client-side close is seen as clean. Perhaps we should try to re-connect here and let it fail
+               ; or automatically recover. We could getConnections and close the underlying
+               ; websocket with code CloseFrame.ABNORMAL
+               #?(:clj (do (println "readystate" (.getReadyState ^WebSocketClient @socket_))
+                         (.reconnect ^WebSocketClient @socket_)
+                           ) :cljs nil)
                (when-let [cb-uuid ?cb-uuid]
                  (let [cb-fn* (or (pull-unused-cb-fn! cbs-waiting_ cb-uuid)
                                   (have ?cb-fn))]
@@ -1171,8 +1180,7 @@
                                #?(:clj
                                   {:udt    (enc/now-udt)
                                    :ev     nil ;ws-ev ;does this need to exist?
-                                   ; TODO can we assume client-side close is always clean?
-                                   :clean? (not remote)
+                                   :clean? (= code CloseFrame/NORMAL)
                                    :code   code
                                    :reason reason}
 
