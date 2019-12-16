@@ -1079,7 +1079,8 @@
                    (cb-fn* :chsk/timeout)))))
 
            (try
-             (.send ^WebSocketClient @socket_ ^String ppstr)
+             #?(:clj (.send ^WebSocketClient @socket_ ^String ppstr)
+                :cljs (.send @socket_ ppstr))
              (reset! udt-last-comms_ (enc/now-udt))
              :apparent-success
              (catch #?(:clj Throwable :cljs :default) e
