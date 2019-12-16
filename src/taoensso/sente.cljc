@@ -1021,7 +1021,7 @@
 
 #?(:cljs
 (defn create-js-client-websocket! [onerror-fn onmessage-fn onclose-fn uri-str]
-  (let [?socket (WebSocket. uri-str)]
+  (let [?socket (js/WebSocket. uri-str)]
    (doto ?socket
      (aset "onerror" onerror-fn)
      (aset "onmessage"                ; Nb receives both push & cb evs!
