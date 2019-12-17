@@ -1,3 +1,6 @@
+> **_NOTE_**  This fork allows making Sente clients from clj/Java, i.e. on the server side, using a pure Java websocket
+> library. Status is a working alpha.
+
 <a href="https://www.taoensso.com" title="More stuff by @ptaoussanis at www.taoensso.com">
 <img src="https://www.taoensso.com/taoensso-open-source.png" alt="Taoensso open-source" width="400"/></a>
 
