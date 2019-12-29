@@ -309,6 +309,9 @@
     :user-id-fn        ;  (fn [ring-req]) -> unique user-id for server>user push.
     :csrf-token-fn     ; ?(fn [ring-req]) -> CSRF-token for Ajax POSTs and WS handshake.
                        ;                     CSRF check will be skipped iff nil (NOT RECOMMENDED!).
+    :bad-auth-header-fn    : ?(fn [ring-req]) -> bad-auth-header-fn for failed authorization based on Authorization header
+    :authorized-header-fn : ?(fn [auth-header]) -> authorized-header-fn authorize request when Authorization header exists.
+                                              return true for authorized
     :handshake-data-fn ; (fn [ring-req]) -> arb user data to append to handshake evs.
     :ws-kalive-ms      ; Ping to keep a WebSocket conn alive if no activity
                        ; w/in given msecs. Should be different to client's :ws-kalive-ms.
@@ -331,7 +334,8 @@
   [web-server-ch-adapter
    & [{:keys [recv-buf-or-n ws-kalive-ms lp-timeout-ms
               send-buf-ms-ajax send-buf-ms-ws
-              user-id-fn bad-csrf-fn bad-origin-fn csrf-token-fn handshake-data-fn packer allowed-origins]
+              user-id-fn bad-csrf-fn bad-origin-fn csrf-token-fn bad-auth-header-fn authorized-header-fn
+              handshake-data-fn packer allowed-origins]
        :or   {recv-buf-or-n    (async/sliding-buffer 1000)
               ws-kalive-ms     (enc/ms :secs 25) ; < Heroku 55s timeout
               lp-timeout-ms    (enc/ms :secs 20) ; < Heroku 30s timeout
@@ -339,6 +343,7 @@
               send-buf-ms-ws   30
               user-id-fn    (fn [ring-req] (get-in ring-req [:session :uid]))
               bad-csrf-fn   (fn [_ring-req] {:status 403 :body "Bad CSRF token"})
+              bad-auth-header-fn   (fn [_ring-req] {:status 403 :body "Unauthorized authentication header"})
               bad-origin-fn (fn [_ring-req] {:status 403 :body "Unauthorized origin"})
               csrf-token-fn (fn [ring-req]
                               (or (:anti-forgery-token ring-req)
@@ -525,6 +530,14 @@
           ;; undefined):
           nil)
 
+        bad-auth-header?
+        (fn [ring-req]
+          ; Pass only if there's no Authentication header and no authorized-header-fn
+          (if-let [auth-header (get-in ring-req [:headers "Authorization"])]
+            (if (nil? authorized-header-fn)
+              true
+              (not (authorized-header-fn auth-header)))))
+
         bad-csrf?
         (fn [ring-req]
           (if (nil? csrf-token-fn) ; Provides a way to disable CSRF check
@@ -638,6 +651,9 @@
            (let [err-msg "Client's Ring request doesn't have a client id. Does your server have the necessary keyword Ring middleware (`wrap-params` & `wrap-keyword-params`)?"]
              (errorf (str err-msg ": %s") ring-req) ; Careful re: % in req
              (throw (ex-info err-msg {:ring-req ring-req})))
+
+           (bad-auth-header?   ring-req)
+           (bad-auth-header-fn ring-req)
 
            (bad-csrf?   ring-req)
            (bad-csrf-fn ring-req)
