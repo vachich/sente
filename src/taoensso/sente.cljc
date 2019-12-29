@@ -990,14 +990,14 @@
                nil)))))))
 
 #?(:clj
-   (defn create-java-client-websocket! [onerror-fn onmessage-fn onclose-fn uri-str]
+   (defn create-java-client-websocket! [onerror-fn onmessage-fn onclose-fn uri-str headers]
      (let [uri (URI. uri-str)
-           headers
-           (ImmutableMap/of
-             "Origin" "http://localhost:3200"
-             "Referer" "http://localhost:3200"
-             "Sec-WebSocket-Extensions" "permessage-deflate; client_max_window_bits"
-             )
+           ;headers
+           ;(ImmutableMap/of
+           ;  "Origin" "http://localhost:3200"
+           ;  "Referer" "http://localhost:3200"
+           ;  "Sec-WebSocket-Extensions" "permessage-deflate; client_max_window_bits"
+           ;  )
        ws-client (proxy [WebSocketClient] [uri headers]
          (onOpen [^ServerHandshake handshakedata]
            (println "ws onOpen " handshakedata)
@@ -1018,7 +1018,7 @@
        ws-client)))
 
 #?(:cljs
-(defn create-js-client-websocket! [onerror-fn onmessage-fn onclose-fn uri-str]
+(defn create-js-client-websocket! [onerror-fn onmessage-fn onclose-fn uri-str headers]
   (let [?socket (js/WebSocket. uri-str)]
    (doto ?socket
      (aset "onerror" onerror-fn)
@@ -1030,15 +1030,15 @@
      (aset "onclose" onclose-fn))
     ?socket)))
 
-(defn create-websocket! [onerror-fn onmessage-fn onclose-fn uri-str]
-  #?(:clj  (create-java-client-websocket! onerror-fn onmessage-fn onclose-fn uri-str)
-     :cljs (create-js-client-websocket! onerror-fn onmessage-fn onclose-fn uri-str)))
+(defn create-websocket! [onerror-fn onmessage-fn onclose-fn uri-str headers]
+  #?(:clj  (create-java-client-websocket! onerror-fn onmessage-fn onclose-fn uri-str headers)
+     :cljs (create-js-client-websocket! onerror-fn onmessage-fn onclose-fn uri-str headers)))
 
  (defrecord ChWebSocket
    ;; WebSocket-only IChSocket implementation
    ;; Handles (re)connections, cbs, etc.
 
-   [client-id chs params packer url ws-kalive-ms
+   [client-id chs params headers packer url ws-kalive-ms
     state_ ; {:type _ :open? _ :uid _ :csrf-token _ ...}
     instance-handle_ retry-count_ ever-opened?_
     backoff-ms-fn ; (fn [nattempt]) -> msecs
@@ -1200,7 +1200,8 @@
                            (enc/merge-url-with-query-string url
                              (merge params ; 1st (don't clobber impl.):
                                {:client-id client-id
-                                :csrf-token (:csrf-token @state_)})))
+                                :csrf-token (:csrf-token @state_)}))
+                           headers)
 
                          (catch #?(:clj Throwable :cljs :default) e
                            (errorf e "WebSocket error")
@@ -1515,6 +1516,8 @@
      :port           ; Server port (defaults to current page's port).
      :params         ; Map of any params to incl. in chsk Ring requests (handy
                      ; for application-level auth, etc.).
+     :headers        ; Map of any additional header to include in the initiating request
+                     ; (only works for Java clients for now)
      :packer         ; :edn (default), or an IPacker implementation.
      :ajax-opts      ; Base opts map provided to `taoensso.encore/ajax-lite`.
      :wrap-recv-evs? ; Should events from server be wrapped in [:chsk/recv _]?
@@ -1522,7 +1525,7 @@
                      ; w/in given msecs. Should be different to server's :ws-kalive-ms."
 
    [path ?csrf-token &
-    [{:keys [type protocol host port params recv-buf-or-n packer ws-kalive-ms
+    [{:keys [type protocol host port params headers recv-buf-or-n packer ws-kalive-ms
              client-id ajax-opts wrap-recv-evs? backoff-ms-fn]
       :as   opts
       :or   {type           :auto
@@ -1585,6 +1588,7 @@
          {:client-id    client-id
           :chs          private-chs
           :params       params
+          :headers      headers
           :packer       packer
           :ws-kalive-ms ws-kalive-ms}
 
