@@ -533,7 +533,7 @@
         bad-auth-header?
         (fn [ring-req]
           ; Pass only if there's no Authentication header and no authorized-header-fn
-          (if-let [auth-header (get-in ring-req [:headers "Authorization"])]
+          (if-let [auth-header (get-in ring-req [:headers "authorization"])]
             (if (nil? authorized-header-fn)
               true
               (not (authorized-header-fn auth-header)))))
