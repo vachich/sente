@@ -531,9 +531,8 @@
           nil)
 
         bad-auth-header?
-        (fn [ring-req]
-          ; Pass only if there's no Authentication header and no authorized-header-fn
-          (if-let [auth-header (get-in ring-req [:headers "authorization"])]
+        (fn [auth-header]
+          (when auth-header
             (if (nil? authorized-header-fn)
               true
               (not (authorized-header-fn auth-header)))))
@@ -621,6 +620,7 @@
              params     (get ring-req :params)
              client-id  (get params   :client-id)
              uid        (user-id-fn    ring-req client-id)
+             auth-header (get-in ring-req [:headers "authorization"])
 
              receive-event-msg! ; Partial
              (fn self
@@ -652,13 +652,14 @@
              (errorf (str err-msg ": %s") ring-req) ; Careful re: % in req
              (throw (ex-info err-msg {:ring-req ring-req})))
 
-           (bad-auth-header?   ring-req)
+           ; Ignore csrf and origin checks if Authorization header exists
+           (bad-auth-header?   auth-header)
            (bad-auth-header-fn ring-req)
 
-           (bad-csrf?   ring-req)
+           (and (nil? auth-header) (bad-csrf?   ring-req))
            (bad-csrf-fn ring-req)
 
-           (bad-origin? allowed-origins ring-req)
+           (and (nil? auth-header) (bad-origin? allowed-origins ring-req))
            (bad-origin-fn               ring-req)
 
            :else
