@@ -310,7 +310,7 @@
     :csrf-token-fn     ; ?(fn [ring-req]) -> CSRF-token for Ajax POSTs and WS handshake.
                        ;                     CSRF check will be skipped iff nil (NOT RECOMMENDED!).
     :bad-auth-header-fn    : ?(fn [ring-req]) -> bad-auth-header-fn for failed authorization based on Authorization header
-    :authorized-header-fn : ?(fn [auth-header]) -> authorized-header-fn authorize request when Authorization header exists.
+    :authorized-header-fn : ?(fn [uid auth-header]) -> authorized-header-fn authorize request when Authorization header exists.
                                               return true for authorized
     :handshake-data-fn ; (fn [ring-req]) -> arb user data to append to handshake evs.
     :ws-kalive-ms      ; Ping to keep a WebSocket conn alive if no activity
@@ -531,11 +531,11 @@
           nil)
 
         bad-auth-header?
-        (fn [auth-header]
+        (fn [uid auth-header]
           (when auth-header
             (if (nil? authorized-header-fn)
               true
-              (not (authorized-header-fn auth-header)))))
+              (not (authorized-header-fn uid auth-header)))))
 
         bad-csrf?
         (fn [ring-req]
@@ -653,7 +653,7 @@
              (throw (ex-info err-msg {:ring-req ring-req})))
 
            ; Ignore csrf and origin checks if Authorization header exists
-           (bad-auth-header?   auth-header)
+           (bad-auth-header?   uid auth-header)
            (bad-auth-header-fn ring-req)
 
            (and (nil? auth-header) (bad-csrf?   ring-req))
