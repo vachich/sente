@@ -81,19 +81,20 @@
   {:author "Peter Taoussanis (@ptaoussanis)"}
 
   #?@(:clj [
-     (:require
-       [clojure.string :as str]
-       [clojure.core.async :as async :refer (<! <!! >! >!! put! chan go go-loop)]
-       [taoensso.encore :as enc :refer (swap-in! reset-in! swapped have have! have?)]
-       [taoensso.timbre :as timbre :refer (tracef debugf infof warnf errorf)]
+            (:require
+              [clojure.string :as str]
+              [clojure.core.async :as async :refer (<! <!! >! >!! put! chan go go-loop)]
+              [taoensso.encore :as enc :refer (swap-in! reset-in! swapped have have! have?)]
+              [taoensso.timbre :as timbre :refer (tracef debugf infof warnf errorf)]
        [taoensso.sente.interfaces :as interfaces])
-    (:import (org.java_websocket.client WebSocketClient)
-             (org.java_websocket.handshake ServerHandshake)
+            (:import (org.java_websocket.client WebSocketClient)
+                     (org.java_websocket.handshake ServerHandshake)
              (org.java_websocket.drafts Draft)
-             (com.sun.jndi.toolkit.url Uri)
-             (java.net URI)
-             (com.google.common.collect ImmutableMap)
-             (org.java_websocket.framing CloseFrame)) ])
+                     (com.sun.jndi.toolkit.url Uri)
+                     (java.net URI)
+                     (com.google.common.collect ImmutableMap)
+                     (org.java_websocket.framing CloseFrame)
+                     [java.util Map]) ])
 
   #?(:cljs
      (:require
@@ -1015,7 +1016,7 @@
            ;  "Referer" "http://localhost:3200"
            ;  "Sec-WebSocket-Extensions" "permessage-deflate; client_max_window_bits"
            ;  )
-       ws-client (proxy [WebSocketClient] [uri headers]
+       ws-client (proxy [WebSocketClient] [uri ^Map headers]
          (onOpen [^ServerHandshake handshakedata]
            (println "ws onOpen " handshakedata)
            nil)
@@ -1023,7 +1024,7 @@
            (println "ws onError" ex)
            (onerror-fn ex))
          (onMessage [^String message]
-           (println "ws onMessage" message)
+           ;(println "ws onMessage" message)
            (onmessage-fn message))
          (onClose [code reason remote]
            (println "ws onClose" "code" code "reason" reason "remote" remote)
